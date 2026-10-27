@@ -115,6 +115,57 @@ To wipe it and start fresh: `docker compose down -v`.
 Changing `POSTGRES_PASSWORD` after the first start requires `down -v`,
 because the password is stored in the volume.
 
+## Deploy to AWS (EC2)
+
+The same `docker compose` setup runs on a single EC2 instance.
+
+1. Launch an Ubuntu 24.04 EC2 instance (`t3.micro`). Use a security group that
+   allows SSH (22) and HTTP (80) from your own IP only. Ports 5432 and 8080 stay closed.
+2. Add swap so image builds don't run out of memory:
+
+   ```bash
+   sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
+   sudo mkswap /swapfile && sudo swapon /swapfile
+   echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+   ```
+
+3. Install Docker and Git:
+
+   ```bash
+   sudo apt-get update && sudo apt-get install -y git
+   curl -fsSL https://get.docker.com | sudo sh
+   sudo usermod -aG docker ubuntu
+   ```
+
+   Log out and back in so the group change applies.
+
+4. Clone the repo and create `.env` on the server. The password is generated
+   there and never committed:
+
+   ```bash
+   git clone https://github.com/owolabigrace/Todo-Application.git
+   cd Todo-Application
+   echo "POSTGRES_PASSWORD=$(openssl rand -hex 16)" > .env
+   echo "WEB_PORT=80" >> .env
+   ```
+
+5. Start the app and open `http://<instance-public-ip>`:
+
+   ```bash
+   docker compose up -d --build
+   ```
+
+To update after pushing changes: `git pull && docker compose up -d --build`.
+
+### Limitations
+
+- No authentication yet. Anyone who can reach the URL can edit the list,
+  so the security group restricts access to your IP.
+- HTTP only. HTTPS needs a domain name and a certificate.
+- The public IP changes if the instance is stopped and started.
+
 ## Roadmap
 
-- AWS deployment
+- Authentication
+- HTTPS and a domain name
+- Optional: serve the frontend from S3 or Vercel

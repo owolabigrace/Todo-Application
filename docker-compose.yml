@@ -1,6 +1,7 @@
 services:
   db:
     image: postgres:17-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_USER: todo
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
@@ -16,6 +17,7 @@ services:
 
   backend:
     build: ./backend
+    restart: unless-stopped
     environment:
       DATABASE_URL: postgres://todo:${POSTGRES_PASSWORD}@db:5432/todoapp?sslmode=disable
     depends_on:
@@ -24,6 +26,7 @@ services:
 
   frontend:
     build: ./frontend
+    restart: unless-stopped
     ports:
       - "${WEB_PORT:-3000}:80"
     depends_on:
