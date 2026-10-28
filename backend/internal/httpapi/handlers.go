@@ -5,11 +5,20 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"todo-app/internal/store"
+	"todo-app/internal/todo"
+)
+
+const (
+	maxTitleLen  = 200
+	maxNotesLen  = 2000
+	maxSearchLen = 200
 )
 
 type Handler struct {
@@ -25,7 +34,7 @@ func NewHandler(s store.Store) *Handler {
 func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET /", h.homeHandler)
+	mux.HandleFunc("GET /{$}", h.homeHandler)
 	mux.HandleFunc("GET /api/todos", h.getTodosHandler)
 	mux.HandleFunc("POST /api/todos", h.createTodoHandler)
 	mux.HandleFunc("GET /api/todos/{id}", h.getTodoHandler)
@@ -33,6 +42,99 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("DELETE /api/todos/{id}", h.deleteTodoHandler)
 
 	return mux
+}
+
+// todoRequest is the JSON body for creating and updating a todo.
+type todoRequest struct {
+	Title     string  `json:"title"`
+	Notes     string  `json:"notes"`
+	Completed bool    `json:"completed"`
+	Priority  string  `json:"priority"`
+	DueDate   *string `json:"due_date"`
+}
+
+func (r todoRequest) toInput() (todo.Input, error) {
+	title := strings.TrimSpace(r.Title)
+	if title == "" {
+		return todo.Input{}, errors.New("Title is required")
+	}
+
+	if utf8.RuneCountInString(title) > maxTitleLen {
+		return todo.Input{}, errors.New("Title must be 200 characters or fewer")
+	}
+
+	notes := strings.TrimSpace(r.Notes)
+	if utf8.RuneCountInString(notes) > maxNotesLen {
+		return todo.Input{}, errors.New("Notes must be 2000 characters or fewer")
+	}
+
+	priority := strings.TrimSpace(r.Priority)
+	if priority == "" {
+		priority = todo.PriorityMedium
+	}
+
+	if !todo.ValidPriority(priority) {
+		return todo.Input{}, errors.New("Priority must be low, medium or high")
+	}
+
+	var due *string
+
+	if r.DueDate != nil {
+		d := strings.TrimSpace(*r.DueDate)
+		if d != "" {
+			if _, err := time.Parse("2006-01-02", d); err != nil {
+				return todo.Input{}, errors.New("Due date must be a valid date in YYYY-MM-DD format")
+			}
+
+			due = &d
+		}
+	}
+
+	return todo.Input{
+		Title:     title,
+		Notes:     notes,
+		Completed: r.Completed,
+		Priority:  priority,
+		DueDate:   due,
+	}, nil
+}
+
+func parseFilter(q url.Values) (todo.Filter, error) {
+	f := todo.Filter{
+		Status:   q.Get("status"),
+		Priority: q.Get("priority"),
+		Search:   strings.TrimSpace(q.Get("q")),
+		Sort:     q.Get("sort"),
+		Order:    q.Get("order"),
+	}
+
+	switch f.Status {
+	case "", "all", "active", "completed":
+	default:
+		return f, errors.New("status must be all, active or completed")
+	}
+
+	if f.Priority != "" && !todo.ValidPriority(f.Priority) {
+		return f, errors.New("priority must be low, medium or high")
+	}
+
+	switch f.Sort {
+	case "", "created", "due", "priority", "title":
+	default:
+		return f, errors.New("sort must be created, due, priority or title")
+	}
+
+	switch f.Order {
+	case "", "asc", "desc":
+	default:
+		return f, errors.New("order must be asc or desc")
+	}
+
+	if utf8.RuneCountInString(f.Search) > maxSearchLen {
+		return f, errors.New("search text must be 200 characters or fewer")
+	}
+
+	return f, nil
 }
 
 func (h *Handler) homeHandler(
@@ -48,7 +150,13 @@ func (h *Handler) getTodosHandler(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	items, err := h.store.List(r.Context())
+	filter, err := parseFilter(r.URL.Query())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	items, err := h.store.List(r.Context(), filter)
 	if err != nil {
 		log.Printf("List todos failed: %v", err)
 		writeError(
@@ -66,11 +174,9 @@ func (h *Handler) createTodoHandler(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	var input struct {
-		Title string `json:"title"`
-	}
+	var req todoRequest
 
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(
 			w,
 			http.StatusBadRequest,
@@ -79,23 +185,13 @@ func (h *Handler) createTodoHandler(
 		return
 	}
 
-	input.Title = strings.TrimSpace(input.Title)
-
-	if input.Title == "" {
-		writeError(w, http.StatusBadRequest, "Title is required")
+	input, err := req.toInput()
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	if len([]rune(input.Title)) > 200 {
-		writeError(
-			w,
-			http.StatusBadRequest,
-			"Title must be 200 characters or fewer",
-		)
-		return
-	}
-
-	item, err := h.store.Create(r.Context(), input.Title)
+	item, err := h.store.Create(r.Context(), input)
 	if err != nil {
 		log.Printf("Create todo failed: %v", err)
 		writeError(
@@ -156,12 +252,9 @@ func (h *Handler) updateTodoHandler(
 		return
 	}
 
-	var input struct {
-		Title     string `json:"title"`
-		Completed bool   `json:"completed"`
-	}
+	var req todoRequest
 
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(
 			w,
 			http.StatusBadRequest,
@@ -170,28 +263,13 @@ func (h *Handler) updateTodoHandler(
 		return
 	}
 
-	input.Title = strings.TrimSpace(input.Title)
-
-	if input.Title == "" {
-		writeError(w, http.StatusBadRequest, "Title is required")
+	input, err := req.toInput()
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	if len([]rune(input.Title)) > 200 {
-		writeError(
-			w,
-			http.StatusBadRequest,
-			"Title must be 200 characters or fewer",
-		)
-		return
-	}
-
-	item, err := h.store.Update(
-		r.Context(),
-		id,
-		input.Title,
-		input.Completed,
-	)
+	item, err := h.store.Update(r.Context(), id, input)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "Todo not found")
