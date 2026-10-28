@@ -26,11 +26,11 @@ Browser ──► React (Vite, :5173) ──/api──► Go API (:8080) ──�
 
 ### 1. Database
 
-Create the database and table:
+Create an empty database. The backend creates and updates the tables itself
+on startup (migrations in `backend/internal/migrate/migrations/`):
 
 ```powershell
 psql -U postgres -h localhost -c "CREATE DATABASE todoapp;"
-psql -U postgres -h localhost -d todoapp -f db/schema.sql
 ```
 
 ### 2. Backend

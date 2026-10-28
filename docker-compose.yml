@@ -8,7 +8,6 @@ services:
       POSTGRES_DB: todoapp
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./db/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U todo -d todoapp"]
       interval: 5s

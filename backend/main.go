@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"todo-app/internal/httpapi"
+	"todo-app/internal/migrate"
 	"todo-app/internal/store"
 )
 
@@ -23,7 +24,7 @@ func main() {
 	}
 	defer db.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	if err := db.PingContext(ctx); err != nil {
@@ -31,6 +32,10 @@ func main() {
 	}
 
 	log.Println("Connected to PostgreSQL")
+
+	if err := migrate.Up(ctx, db); err != nil {
+		log.Fatalf("Migration failed: %v", err)
+	}
 
 	todoStore := store.NewPostgresStore(db)
 	server := httpapi.NewServer(todoStore)
