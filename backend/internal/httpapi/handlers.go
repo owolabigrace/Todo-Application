@@ -35,22 +35,28 @@ func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /{$}", h.homeHandler)
+
 	mux.HandleFunc("GET /api/todos", h.getTodosHandler)
 	mux.HandleFunc("POST /api/todos", h.createTodoHandler)
 	mux.HandleFunc("GET /api/todos/{id}", h.getTodoHandler)
 	mux.HandleFunc("PUT /api/todos/{id}", h.updateTodoHandler)
 	mux.HandleFunc("DELETE /api/todos/{id}", h.deleteTodoHandler)
 
+	mux.HandleFunc("GET /api/categories", h.getCategoriesHandler)
+	mux.HandleFunc("POST /api/categories", h.createCategoryHandler)
+	mux.HandleFunc("PUT /api/categories/{id}", h.updateCategoryHandler)
+	mux.HandleFunc("DELETE /api/categories/{id}", h.deleteCategoryHandler)
+
 	return mux
 }
 
-// todoRequest is the JSON body for creating and updating a todo.
 type todoRequest struct {
-	Title     string  `json:"title"`
-	Notes     string  `json:"notes"`
-	Completed bool    `json:"completed"`
-	Priority  string  `json:"priority"`
-	DueDate   *string `json:"due_date"`
+	Title      string  `json:"title"`
+	Notes      string  `json:"notes"`
+	Completed  bool    `json:"completed"`
+	Priority   string  `json:"priority"`
+	DueDate    *string `json:"due_date"`
+	CategoryID *int    `json:"category_id"`
 }
 
 func (r todoRequest) toInput() (todo.Input, error) {
@@ -90,12 +96,17 @@ func (r todoRequest) toInput() (todo.Input, error) {
 		}
 	}
 
+	if r.CategoryID != nil && *r.CategoryID <= 0 {
+		return todo.Input{}, errors.New("Category ID must be a positive integer")
+	}
+
 	return todo.Input{
-		Title:     title,
-		Notes:     notes,
-		Completed: r.Completed,
-		Priority:  priority,
-		DueDate:   due,
+		Title:      title,
+		Notes:      notes,
+		Completed:  r.Completed,
+		Priority:   priority,
+		DueDate:    due,
+		CategoryID: r.CategoryID,
 	}, nil
 }
 
@@ -132,6 +143,21 @@ func parseFilter(q url.Values) (todo.Filter, error) {
 
 	if utf8.RuneCountInString(f.Search) > maxSearchLen {
 		return f, errors.New("search text must be 200 characters or fewer")
+	}
+
+	category := q.Get("category")
+
+	switch {
+	case category == "":
+	case category == "none":
+		f.Uncategorized = true
+	default:
+		id, err := strconv.Atoi(category)
+		if err != nil || id <= 0 {
+			return f, errors.New("category must be a positive integer or none")
+		}
+
+		f.CategoryID = &id
 	}
 
 	return f, nil
@@ -193,6 +219,11 @@ func (h *Handler) createTodoHandler(
 
 	item, err := h.store.Create(r.Context(), input)
 	if err != nil {
+		if errors.Is(err, store.ErrInvalidCategory) {
+			writeError(w, http.StatusBadRequest, "Category does not exist")
+			return
+		}
+
 		log.Printf("Create todo failed: %v", err)
 		writeError(
 			w,
@@ -276,6 +307,11 @@ func (h *Handler) updateTodoHandler(
 			return
 		}
 
+		if errors.Is(err, store.ErrInvalidCategory) {
+			writeError(w, http.StatusBadRequest, "Category does not exist")
+			return
+		}
+
 		log.Printf("Update todo failed: %v", err)
 		writeError(
 			w,
@@ -323,7 +359,7 @@ func (h *Handler) deleteTodoHandler(
 func parseID(value string) (int, error) {
 	id, err := strconv.Atoi(value)
 	if err != nil || id <= 0 {
-		return 0, errors.New("invalid Todo ID")
+		return 0, errors.New("invalid ID")
 	}
 
 	return id, nil

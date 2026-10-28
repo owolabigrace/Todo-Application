@@ -38,7 +38,7 @@ func newTestStore(t *testing.T) *PostgresStore {
 		t.Fatalf("migrate: %v", err)
 	}
 
-	if _, err := db.ExecContext(ctx, `TRUNCATE todos RESTART IDENTITY`); err != nil {
+	if _, err := db.ExecContext(ctx, `TRUNCATE todos, categories RESTART IDENTITY`); err != nil {
 		t.Fatalf("reset table: %v", err)
 	}
 

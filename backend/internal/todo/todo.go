@@ -18,27 +18,37 @@ func ValidPriority(p string) bool {
 }
 
 type Todo struct {
+	ID         int       `json:"id"`
+	Title      string    `json:"title"`
+	Notes      string    `json:"notes"`
+	Completed  bool      `json:"completed"`
+	Priority   string    `json:"priority"`
+	DueDate    *string   `json:"due_date"`
+	CategoryID *int      `json:"category_id"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+type Category struct {
 	ID        int       `json:"id"`
-	Title     string    `json:"title"`
-	Notes     string    `json:"notes"`
-	Completed bool      `json:"completed"`
-	Priority  string    `json:"priority"`
-	DueDate   *string   `json:"due_date"`
+	Name      string    `json:"name"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
 type Input struct {
-	Title     string
-	Notes     string
-	Completed bool
-	Priority  string
-	DueDate   *string // "YYYY-MM-DD", or nil for no due date
+	Title      string
+	Notes      string
+	Completed  bool
+	Priority   string
+	DueDate    *string
+	CategoryID *int
 }
 
 type Filter struct {
-	Status   string // "", "all", "active", "completed"
-	Priority string // "", "low", "medium", "high"
-	Search   string
-	Sort     string // "", "created", "due", "priority", "title"
-	Order    string // "", "asc", "desc"
+	Status        string
+	Priority      string
+	Search        string
+	Sort          string
+	Order         string
+	CategoryID    *int
+	Uncategorized bool
 }

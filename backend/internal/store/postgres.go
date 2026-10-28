@@ -10,14 +10,19 @@ import (
 
 	"todo-app/internal/todo"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 const queryTimeout = 5 * time.Second
 
-const todoColumns = `id, title, notes, completed, priority, to_char(due_date, 'YYYY-MM-DD'), created_at`
+const (
+	pgUniqueViolation     = "23505"
+	pgForeignKeyViolation = "23503"
+)
 
-// Escapes LIKE wildcards so a search for "50%" matches a literal percent sign.
+const todoColumns = `id, title, notes, completed, priority, to_char(due_date, 'YYYY-MM-DD'), category_id, created_at`
+
 var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 
 type PostgresStore struct {
@@ -34,9 +39,35 @@ type scanner interface {
 	Scan(dest ...any) error
 }
 
+func pgCode(err error) string {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code
+	}
+
+	return ""
+}
+
+func mapTodoError(err error) error {
+	if pgCode(err) == pgForeignKeyViolation {
+		return ErrInvalidCategory
+	}
+
+	return err
+}
+
+func mapCategoryError(err error) error {
+	if pgCode(err) == pgUniqueViolation {
+		return ErrDuplicate
+	}
+
+	return err
+}
+
 func scanTodo(s scanner) (todo.Todo, error) {
 	var item todo.Todo
 	var due sql.NullString
+	var category sql.NullInt64
 
 	if err := s.Scan(
 		&item.ID,
@@ -45,6 +76,7 @@ func scanTodo(s scanner) (todo.Todo, error) {
 		&item.Completed,
 		&item.Priority,
 		&due,
+		&category,
 		&item.CreatedAt,
 	); err != nil {
 		return todo.Todo{}, err
@@ -55,10 +87,14 @@ func scanTodo(s scanner) (todo.Todo, error) {
 		item.DueDate = &d
 	}
 
+	if category.Valid {
+		c := int(category.Int64)
+		item.CategoryID = &c
+	}
+
 	return item, nil
 }
 
-// orderClause only ever returns fixed strings, never user input.
 func orderClause(f todo.Filter) string {
 	dir := "ASC"
 	if f.Order == "desc" {
@@ -91,6 +127,13 @@ func buildListQuery(f todo.Filter) (string, []any) {
 	if f.Priority != "" {
 		args = append(args, f.Priority)
 		conds = append(conds, fmt.Sprintf("priority = $%d", len(args)))
+	}
+
+	if f.Uncategorized {
+		conds = append(conds, "category_id IS NULL")
+	} else if f.CategoryID != nil {
+		args = append(args, *f.CategoryID)
+		conds = append(conds, fmt.Sprintf("category_id = $%d", len(args)))
 	}
 
 	if f.Search != "" {
@@ -168,13 +211,13 @@ func (s *PostgresStore) Create(
 	defer cancel()
 
 	item, err := scanTodo(s.db.QueryRowContext(ctx, `
-		INSERT INTO todos (title, notes, completed, priority, due_date)
-		VALUES ($1, $2, $3, $4, $5::text::date)
+		INSERT INTO todos (title, notes, completed, priority, due_date, category_id)
+		VALUES ($1, $2, $3, $4, $5::text::date, $6)
 		RETURNING `+todoColumns,
-		in.Title, in.Notes, in.Completed, in.Priority, in.DueDate,
+		in.Title, in.Notes, in.Completed, in.Priority, in.DueDate, in.CategoryID,
 	))
 	if err != nil {
-		return todo.Todo{}, err
+		return todo.Todo{}, mapTodoError(err)
 	}
 
 	return item, nil
@@ -190,10 +233,11 @@ func (s *PostgresStore) Update(
 
 	item, err := scanTodo(s.db.QueryRowContext(ctx, `
 		UPDATE todos
-		SET title = $1, notes = $2, completed = $3, priority = $4, due_date = $5::text::date
-		WHERE id = $6
+		SET title = $1, notes = $2, completed = $3, priority = $4,
+		    due_date = $5::text::date, category_id = $6
+		WHERE id = $7
 		RETURNING `+todoColumns,
-		in.Title, in.Notes, in.Completed, in.Priority, in.DueDate, id,
+		in.Title, in.Notes, in.Completed, in.Priority, in.DueDate, in.CategoryID, id,
 	))
 
 	if errors.Is(err, sql.ErrNoRows) {
@@ -201,7 +245,7 @@ func (s *PostgresStore) Update(
 	}
 
 	if err != nil {
-		return todo.Todo{}, err
+		return todo.Todo{}, mapTodoError(err)
 	}
 
 	return item, nil
@@ -216,6 +260,115 @@ func (s *PostgresStore) Delete(
 
 	result, err := s.db.ExecContext(ctx, `
 		DELETE FROM todos
+		WHERE id = $1
+	`, id)
+	if err != nil {
+		return err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rowsAffected == 0 {
+		return ErrNotFound
+	}
+
+	return nil
+}
+
+func (s *PostgresStore) ListCategories(ctx context.Context) ([]todo.Category, error) {
+	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, name, created_at
+		FROM categories
+		ORDER BY lower(name), id
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make([]todo.Category, 0)
+
+	for rows.Next() {
+		var c todo.Category
+
+		if err := rows.Scan(&c.ID, &c.Name, &c.CreatedAt); err != nil {
+			return nil, err
+		}
+
+		result = append(result, c)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
+func (s *PostgresStore) CreateCategory(
+	ctx context.Context,
+	name string,
+) (todo.Category, error) {
+	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+
+	var c todo.Category
+
+	err := s.db.QueryRowContext(ctx, `
+		INSERT INTO categories (name)
+		VALUES ($1)
+		RETURNING id, name, created_at
+	`, name).Scan(&c.ID, &c.Name, &c.CreatedAt)
+	if err != nil {
+		return todo.Category{}, mapCategoryError(err)
+	}
+
+	return c, nil
+}
+
+func (s *PostgresStore) UpdateCategory(
+	ctx context.Context,
+	id int,
+	name string,
+) (todo.Category, error) {
+	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+
+	var c todo.Category
+
+	err := s.db.QueryRowContext(ctx, `
+		UPDATE categories
+		SET name = $1
+		WHERE id = $2
+		RETURNING id, name, created_at
+	`, name, id).Scan(&c.ID, &c.Name, &c.CreatedAt)
+
+	if errors.Is(err, sql.ErrNoRows) {
+		return todo.Category{}, ErrNotFound
+	}
+
+	if err != nil {
+		return todo.Category{}, mapCategoryError(err)
+	}
+
+	return c, nil
+}
+
+func (s *PostgresStore) DeleteCategory(
+	ctx context.Context,
+	id int,
+) error {
+	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+
+	result, err := s.db.ExecContext(ctx, `
+		DELETE FROM categories
 		WHERE id = $1
 	`, id)
 	if err != nil {
